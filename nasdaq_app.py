@@ -117,24 +117,20 @@ NASDAQ_CONSTITUENTS = [
     {'Symbol': 'CDW', 'Company': 'CDW Corp/DE', 'Allocation': 0.001},
 ]
 
-# 解析成分股並建立名稱對照表
 @st.cache_data(ttl=3600)
 def parse_nasdaq_data():
     tickers = []
     name_map = {}
     for item in NASDAQ_CONSTITUENTS:
         sym = item['Symbol']
-        if sym != 'CASH': # 排除現金項目
+        if sym != 'CASH': 
             tickers.append(sym)
             name_map[sym] = item['Company']
     return list(set(tickers)), name_map
 
-# 提取前 10 大權值股 (用於 RRG 和 Bar Chart)
 @st.cache_data(ttl=3600)
 def get_top10_tickers():
-    # 根據 Allocation 排序
     sorted_stocks = sorted(NASDAQ_CONSTITUENTS, key=lambda x: x.get('Allocation', 0), reverse=True)
-    # 取前 10 (排除 CASH)
     top10 = [item['Symbol'] for item in sorted_stocks if item['Symbol'] != 'CASH'][:10]
     return top10
 
@@ -144,8 +140,8 @@ def get_top10_tickers():
 
 @st.cache_data(ttl=3600)
 def get_market_data(tickers):
-    # ^NDX: Nasdaq 100, ^VXN: Nasdaq VIX, TLT: 20y Bond
-    all_tickers = tickers + ['^NDX', 'TLT', '^VXN'] 
+    # 新增下載 HYG (高收益債)
+    all_tickers = tickers + ['^NDX', 'TLT', '^VXN', 'HYG'] 
     try:
         data = yf.download(all_tickers, period="2y", group_by='ticker', threads=True, auto_adjust=True)
         return data
@@ -156,6 +152,7 @@ def get_market_data(tickers):
 def calculate_market_indicators(data, tickers):
     ndx = data['^NDX']['Close']
     tlt = data['TLT']['Close']
+    hyg = data['HYG']['Close']
     vxn = data['^VXN']['Close']
     
     benchmark_idx = ndx.index
@@ -181,9 +178,8 @@ def calculate_market_indicators(data, tickers):
     net_nh_nl = new_highs - new_lows
     cum_net_highs = net_nh_nl.cumsum()
     
-    # C. 恐慌指標 (VXN) - 使用 VXN 絕對值觀察
+    # C. 恐慌指標 (VXN)
     vxn_ma50 = vxn.rolling(window=50).mean()
-    # 定義恐慌比率: VXN / VXN_MA50 (乖離率概念)
     vxn_ratio = vxn / vxn_ma50
     
     # D. 資產強弱 (NDX vs TLT)
@@ -203,6 +199,14 @@ def calculate_market_indicators(data, tickers):
     ad_ratio = advancing_issues / declining_issues.replace(0, 1)
     vol_ratio = advancing_volume / declining_volume.replace(0, 1)
     trin = ad_ratio / vol_ratio
+
+    # F. 平均近 20 日上漲-下跌家數 (Net Advances MA20) - 新增
+    net_advances = advancing_issues - declining_issues
+    ad_ma20 = net_advances.rolling(window=20).mean()
+
+    # G. 風險偏好: 高收益債/美債 (HYG/TLT) - 新增
+    # 比值上升代表資金追求高風險收益 (Risk On)，下降代表避險 (Risk Off)
+    hyg_tlt_ratio = hyg / tlt
     
     lookback = 130
     return {
@@ -213,18 +217,18 @@ def calculate_market_indicators(data, tickers):
         'vxn': vxn.iloc[-lookback:], 
         'vxn_ratio': vxn_ratio.iloc[-lookback:],
         'strength_diff': strength_diff.iloc[-lookback:],
-        'trin': trin.iloc[-lookback:]
+        'trin': trin.iloc[-lookback:],
+        'ad_ma20': ad_ma20.iloc[-lookback:], # 新增
+        'hyg_tlt': hyg_tlt_ratio.iloc[-lookback:] # 新增
     }
 
 def calculate_top10_rrg(data, top10_tickers):
-    """計算前十大權值股的 RRG"""
     ndx = data['^NDX']['Close']
     rrg_data = []
     
     for ticker in top10_tickers:
         if ticker in data:
             close = data[ticker]['Close']
-            # RS Calculation
             rs = close / ndx
             rs_trend = rs.rolling(window=10).mean()
             rs_mean = rs_trend.rolling(window=60).mean()
@@ -234,7 +238,6 @@ def calculate_top10_rrg(data, top10_tickers):
             x_val_prev = ((rs_trend - rs_mean) / rs_std).iloc[-10]
             y_val = x_val - x_val_prev
             
-            # 今日漲跌
             df = data[ticker]
             df = df.dropna(subset=['Close'])
             chg = ((df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100 if len(df) >= 2 else 0
@@ -243,7 +246,6 @@ def calculate_top10_rrg(data, top10_tickers):
     return pd.DataFrame(rrg_data)
 
 def get_top10_performance(data, top10_tickers):
-    """計算前十大權值股今日漲跌幅"""
     perf = {}
     for ticker in top10_tickers:
         try:
@@ -279,14 +281,12 @@ def get_latest_snapshot_with_strategy(data, tickers, name_map):
             high_52w = df['High'].tail(252).max()
             low_52w = df['Low'].tail(252).min()
             
-            # 策略 1: Super Trend
             trend_score = 0
             if close > ma50 > ma150 > ma200: trend_score += 1
             if close > low_52w * 1.3: trend_score += 1
             if close > high_52w * 0.75: trend_score += 1
             is_super_trend = (trend_score == 3)
             
-            # 策略 2: Pocket Pivot
             is_pocket_pivot = False
             if change_pct > 0:
                 last_10 = df.iloc[-11:-1]
@@ -344,7 +344,7 @@ def main():
     # 計算 NDX Y軸動態範圍 (Zoom In)
     ndx_min = mkt['ndx'].min()
     ndx_max = mkt['ndx'].max()
-    padding = (ndx_max - ndx_min) * 0.05 # 5% 留白
+    padding = (ndx_max - ndx_min) * 0.05 
     ndx_range = [ndx_min - padding, ndx_max + padding]
 
     def fmt(df, val_col=None, fmt_str='{:.2f}'):
@@ -360,58 +360,82 @@ def main():
     # --- Part 1: 大盤健康度 ---
     st.header("一、 大盤健康度診斷 (Market Health)")
     
-    # Breadth
-    fig_breadth = make_subplots(specs=[[{"secondary_y": True}]])
-    fig_breadth.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", line=dict(color='black', width=1)), secondary_y=False)
-    fig_breadth.add_trace(go.Scatter(x=x_axis, y=mkt['breadth_pct'], name="% > MA60", line=dict(color='blue', width=2), fill='tozeroy', fillcolor='rgba(0,0,255,0.1)'), secondary_y=True)
-    fig_breadth.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="50% 分界", secondary_y=True)
-    fig_breadth.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
-    fig_breadth.update_yaxes(title_text="比例 (%)", range=[0, 100], secondary_y=True)
-    fig_breadth.update_layout(title="市場廣度：站上 60MA 比例", height=350)
-    st.plotly_chart(fig_breadth, use_container_width=True)
+    col1_1, col1_2 = st.columns(2)
+    with col1_1:
+        # Breadth
+        fig_breadth = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_breadth.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", line=dict(color='black', width=1)), secondary_y=False)
+        fig_breadth.add_trace(go.Scatter(x=x_axis, y=mkt['breadth_pct'], name="% > MA60", line=dict(color='blue', width=2), fill='tozeroy', fillcolor='rgba(0,0,255,0.1)'), secondary_y=True)
+        fig_breadth.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="50% 分界", secondary_y=True)
+        fig_breadth.update_yaxes(range=ndx_range, secondary_y=False) 
+        fig_breadth.update_yaxes(title_text="比例 (%)", range=[0, 100], secondary_y=True)
+        fig_breadth.update_layout(title="市場廣度：站上 60MA 比例", height=350)
+        st.plotly_chart(fig_breadth, use_container_width=True)
 
-    # Cumul Net Highs
-    fig_nhnl = make_subplots(specs=[[{"secondary_y": True}]])
-    fig_nhnl.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
-    fig_nhnl.add_trace(go.Scatter(x=x_axis, y=mkt['cum_net_highs'], name="Cumul Net Highs", line=dict(color='green', width=2)), secondary_y=True)
-    fig_nhnl.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
-    fig_nhnl.update_layout(title="市場趨勢：累積淨新高線 (Cumulative Net Highs)", height=350)
-    st.plotly_chart(fig_nhnl, use_container_width=True)
+    with col1_2:
+        # Net Advances
+        fig_ad = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_ad.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", line=dict(color='black', width=1)), secondary_y=False)
+        fig_ad.add_trace(go.Bar(x=x_axis, y=mkt['ad_ma20'], name="20MA Net Advances", marker_color=['green' if v>0 else 'red' for v in mkt['ad_ma20']], opacity=0.6), secondary_y=True)
+        fig_ad.add_hline(y=0, line_color="gray", secondary_y=True)
+        fig_ad.update_yaxes(range=ndx_range, secondary_y=False)
+        fig_ad.update_layout(title="市場動能：平均近 20 日淨上漲家數", height=350)
+        st.plotly_chart(fig_ad, use_container_width=True)
 
-    # TRIN
-    fig_trin = make_subplots(specs=[[{"secondary_y": True}]])
-    fig_trin.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
-    fig_trin.add_trace(go.Scatter(x=x_axis, y=mkt['trin'], name="TRIN", line=dict(color='orange', width=2)), secondary_y=True)
-    fig_trin.add_hline(y=2.0, line_dash="dot", line_color="red", annotation_text="Panic", secondary_y=True)
-    fig_trin.add_hline(y=0.5, line_dash="dot", line_color="green", annotation_text="Greed", secondary_y=True)
-    fig_trin.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
-    fig_trin.update_yaxes(range=[0, 3], secondary_y=True)
-    fig_trin.update_layout(title="量價結構：TRIN (阿姆斯指數)", height=350)
-    st.plotly_chart(fig_trin, use_container_width=True)
+    col1_3, col1_4 = st.columns(2)
+    with col1_3:
+        # Cumul Net Highs
+        fig_nhnl = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_nhnl.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
+        fig_nhnl.add_trace(go.Scatter(x=x_axis, y=mkt['cum_net_highs'], name="Cumul Net Highs", line=dict(color='green', width=2)), secondary_y=True)
+        fig_nhnl.update_yaxes(range=ndx_range, secondary_y=False)
+        fig_nhnl.update_layout(title="市場趨勢：累積淨新高線 (Cumulative Net Highs)", height=350)
+        st.plotly_chart(fig_nhnl, use_container_width=True)
+
+    with col1_4:
+        # TRIN
+        fig_trin = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_trin.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
+        fig_trin.add_trace(go.Scatter(x=x_axis, y=mkt['trin'], name="TRIN", line=dict(color='orange', width=2)), secondary_y=True)
+        fig_trin.add_hline(y=2.0, line_dash="dot", line_color="red", annotation_text="Panic", secondary_y=True)
+        fig_trin.add_hline(y=0.5, line_dash="dot", line_color="green", annotation_text="Greed", secondary_y=True)
+        fig_trin.update_yaxes(range=ndx_range, secondary_y=False)
+        fig_trin.update_yaxes(range=[0, 3], secondary_y=True)
+        fig_trin.update_layout(title="量價結構：TRIN (阿姆斯指數)", height=350)
+        st.plotly_chart(fig_trin, use_container_width=True)
 
     # --- Part 2: 風險控管 ---
     st.header("二、 風險控管 (Risk Management)")
-    col1, col2 = st.columns(2)
+    col2_1, col2_2, col2_3 = st.columns(3)
     
-    with col1:
-        # VXN vs MA50 (Ratio)
+    with col2_1:
+        # VXN
         fig_vxn = make_subplots(specs=[[{"secondary_y": True}]])
         fig_vxn.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
         fig_vxn.add_trace(go.Scatter(x=x_axis, y=mkt['vxn_ratio'], name="VXN/MA50 Ratio", line=dict(color='red', width=2)), secondary_y=True)
         fig_vxn.add_hline(y=1.0, line_dash="dot", line_color="gray", annotation_text="Avg Level", secondary_y=True)
-        fig_vxn.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
+        fig_vxn.update_yaxes(range=ndx_range, secondary_y=False)
         fig_vxn.update_layout(title="恐慌結構：VXN 乖離率 (VXN / 50MA)", height=350)
         st.plotly_chart(fig_vxn, use_container_width=True)
 
-    with col2:
-        # Strength
+    with col2_2:
+        # Asset Strength
         fig_asset = make_subplots(specs=[[{"secondary_y": True}]])
         fig_asset.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
         fig_asset.add_trace(go.Scatter(x=x_axis, y=mkt['strength_diff'], name="NDX-TLT Diff", line=dict(color='purple', width=2)), secondary_y=True)
         fig_asset.add_hline(y=0, line_dash="solid", line_color="gray", secondary_y=True)
-        fig_asset.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
+        fig_asset.update_yaxes(range=ndx_range, secondary_y=False)
         fig_asset.update_layout(title="資產強弱：(NDX - TLT) 20日報酬差值", height=350)
         st.plotly_chart(fig_asset, use_container_width=True)
+
+    with col2_3:
+        # Risk Appetite: HYG/TLT
+        fig_risk = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_risk.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
+        fig_risk.add_trace(go.Scatter(x=x_axis, y=mkt['hyg_tlt'], name="HYG/TLT Ratio", line=dict(color='orange', width=2)), secondary_y=True)
+        fig_risk.update_yaxes(range=ndx_range, secondary_y=False)
+        fig_risk.update_layout(title="風險偏好：高收益債/公債 (HYG / TLT)", height=350)
+        st.plotly_chart(fig_risk, use_container_width=True)
 
     # --- Part 3: 前十大權值股掃描 ---
     st.header("三、 前十大權值股掃描 (Top 10 Holdings)")
@@ -426,6 +450,12 @@ def main():
     ))
     fig_rrg.add_vline(x=0, line_width=1, line_dash="dash", line_color="gray")
     fig_rrg.add_hline(y=0, line_width=1, line_dash="dash", line_color="gray")
+    # 新增象限標籤 (1) RRG Enhancements
+    fig_rrg.add_annotation(x=2, y=2, text="領先 (Leading)", showarrow=False, font=dict(size=16, color="green"), opacity=0.5)
+    fig_rrg.add_annotation(x=2, y=-2, text="轉弱 (Weakening)", showarrow=False, font=dict(size=16, color="orange"), opacity=0.5)
+    fig_rrg.add_annotation(x=-2, y=-2, text="落後 (Lagging)", showarrow=False, font=dict(size=16, color="red"), opacity=0.5)
+    fig_rrg.add_annotation(x=-2, y=2, text="改善 (Improving)", showarrow=False, font=dict(size=16, color="blue"), opacity=0.5)
+    
     fig_rrg.update_layout(title="前十大權值股 RRG 強弱圖 (右上領先/左下落後)", height=500, xaxis_title="Relative Strength", yaxis_title="Relative Momentum")
     st.plotly_chart(fig_rrg, use_container_width=True)
 
@@ -442,7 +472,6 @@ def main():
     # --- Part 4: 強勢股篩選 ---
     st.header("四、 強勢股篩選 (Stock Selection)")
     
-    # Add 'Name' to columns
     cols_strat = ['Ticker', 'Name', 'Close', 'Change %', 'RVol', '52W High', '52W Low']
     cols_basic = ['Ticker', 'Name', 'Close', 'Change %', '52W High', '52W Low', 'Val']
 
