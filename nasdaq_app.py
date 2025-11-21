@@ -158,10 +158,6 @@ def calculate_market_indicators(data, tickers):
     tlt = data['TLT']['Close']
     vxn = data['^VXN']['Close']
     
-    # 由於 VXN 沒有像 VIX3M 那樣方便的公開代碼，我們直接使用 VXN 的 50日均線作為「中期趨勢」的替代參考
-    # 這裡我們依然畫 VXN，但 Term Structure 部分我們改為 VXN / VXN_MA50 來觀察乖離
-    # 或者單純看 VXN 絕對值
-    
     benchmark_idx = ndx.index
     valid_tickers = [t for t in tickers if t in data]
     
@@ -345,6 +341,12 @@ def main():
 
     x_axis = mkt['dates']
 
+    # 計算 NDX Y軸動態範圍 (Zoom In)
+    ndx_min = mkt['ndx'].min()
+    ndx_max = mkt['ndx'].max()
+    padding = (ndx_max - ndx_min) * 0.05 # 5% 留白
+    ndx_range = [ndx_min - padding, ndx_max + padding]
+
     def fmt(df, val_col=None, fmt_str='{:.2f}'):
         d = df.copy()
         d['Close'] = d['Close'].map('{:,.2f}'.format)
@@ -363,8 +365,8 @@ def main():
     fig_breadth.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", line=dict(color='black', width=1)), secondary_y=False)
     fig_breadth.add_trace(go.Scatter(x=x_axis, y=mkt['breadth_pct'], name="% > MA60", line=dict(color='blue', width=2), fill='tozeroy', fillcolor='rgba(0,0,255,0.1)'), secondary_y=True)
     fig_breadth.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="50% 分界", secondary_y=True)
+    fig_breadth.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
     fig_breadth.update_yaxes(title_text="比例 (%)", range=[0, 100], secondary_y=True)
-    # Nasdaq 100 大約在 18000-22000，設定動態範圍
     fig_breadth.update_layout(title="市場廣度：站上 60MA 比例", height=350)
     st.plotly_chart(fig_breadth, use_container_width=True)
 
@@ -372,6 +374,7 @@ def main():
     fig_nhnl = make_subplots(specs=[[{"secondary_y": True}]])
     fig_nhnl.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
     fig_nhnl.add_trace(go.Scatter(x=x_axis, y=mkt['cum_net_highs'], name="Cumul Net Highs", line=dict(color='green', width=2)), secondary_y=True)
+    fig_nhnl.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
     fig_nhnl.update_layout(title="市場趨勢：累積淨新高線 (Cumulative Net Highs)", height=350)
     st.plotly_chart(fig_nhnl, use_container_width=True)
 
@@ -381,6 +384,7 @@ def main():
     fig_trin.add_trace(go.Scatter(x=x_axis, y=mkt['trin'], name="TRIN", line=dict(color='orange', width=2)), secondary_y=True)
     fig_trin.add_hline(y=2.0, line_dash="dot", line_color="red", annotation_text="Panic", secondary_y=True)
     fig_trin.add_hline(y=0.5, line_dash="dot", line_color="green", annotation_text="Greed", secondary_y=True)
+    fig_trin.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
     fig_trin.update_yaxes(range=[0, 3], secondary_y=True)
     fig_trin.update_layout(title="量價結構：TRIN (阿姆斯指數)", height=350)
     st.plotly_chart(fig_trin, use_container_width=True)
@@ -395,6 +399,7 @@ def main():
         fig_vxn.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
         fig_vxn.add_trace(go.Scatter(x=x_axis, y=mkt['vxn_ratio'], name="VXN/MA50 Ratio", line=dict(color='red', width=2)), secondary_y=True)
         fig_vxn.add_hline(y=1.0, line_dash="dot", line_color="gray", annotation_text="Avg Level", secondary_y=True)
+        fig_vxn.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
         fig_vxn.update_layout(title="恐慌結構：VXN 乖離率 (VXN / 50MA)", height=350)
         st.plotly_chart(fig_vxn, use_container_width=True)
 
@@ -404,6 +409,7 @@ def main():
         fig_asset.add_trace(go.Scatter(x=x_axis, y=mkt['ndx'], name="NDX 100", showlegend=False, line=dict(color='black', width=1)), secondary_y=False)
         fig_asset.add_trace(go.Scatter(x=x_axis, y=mkt['strength_diff'], name="NDX-TLT Diff", line=dict(color='purple', width=2)), secondary_y=True)
         fig_asset.add_hline(y=0, line_dash="solid", line_color="gray", secondary_y=True)
+        fig_asset.update_yaxes(range=ndx_range, secondary_y=False) # 應用動態範圍
         fig_asset.update_layout(title="資產強弱：(NDX - TLT) 20日報酬差值", height=350)
         st.plotly_chart(fig_asset, use_container_width=True)
 
